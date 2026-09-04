@@ -1,0 +1,12 @@
+# Python >= 3.10
+torch>=2.2
+torchvision>=0.17
+numpy>=1.26,<2
+scipy>=1.11
+h5py>=3.10
+pillow>=10.0
+opencv-python-headless>=4.9
+matplotlib>=3.8
+tqdm>=4.66
+jupyter>=1.0
+wandb>=0.17

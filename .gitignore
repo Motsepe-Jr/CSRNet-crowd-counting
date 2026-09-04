@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# Datasets - downloaded and regenerated, never committed.
+# ShanghaiTech is ~330 MB; the UCSD tree reaches ~1.1 GB and ucsdpeds.zip alone
+# is 756 MB, well past GitHub's 100 MB per-file limit.
+# See UCSD_GUIDE.md / DEMO_GUIDE.md for how to fetch and rebuild both.
+# ---------------------------------------------------------------------------
+ShanghaiTech_Crowd_Counting_Dataset/
+UCSD_Crowd_Counting_Dataset/
+*.zip
+*.tar
+*.tar.gz
+
+# Generated ground truth, in case a dataset lands somewhere else
+*.h5
+
+# ---------------------------------------------------------------------------
+# Generated split files - they contain absolute paths to whichever machine
+# produced them, so they are rebuilt rather than shared.
+# ---------------------------------------------------------------------------
+data_splits/
+part_A_*.json
+part_B_*.json
+ucsd_*.json
+
+# ---------------------------------------------------------------------------
+# Training artefacts
+# ---------------------------------------------------------------------------
+checkpoints/
+*.pth
+*.pth.tar
+wandb/
+slurm-*.out
+*.log
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+.venv-cluster/
+.conda-cluster/
+env/
+venv/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
