@@ -117,7 +117,70 @@ comparison.
 
 ---
 
-## 3. A change in the training path you should know about
+## 3. The model and the training loop
+
+Nothing about the architecture changes between ShanghaiTech and UCSD — only
+the data pipeline feeding it. For anyone reading the code cold:
+
+### The idea
+
+Counting by detection fails once heads occlude each other. So instead of
+detecting people, the network regresses a **density map**: a real-valued image
+whose *integral is the crowd count*. A person contributes one unit of mass,
+spread over a Gaussian blob. Sum the map, get the count.
+
+### The network — [`model.py`](model.py)
+
+| Stage | What it is | Why |
+| --- | --- | --- |
+| **Frontend** | first 13 conv layers of VGG16, 3 max-pools | pretrained features; the 3 pools are what make the output 1/8 the input size |
+| **Backend** | 6 conv layers, all `dilation=2` | dilation widens the receptive field *without* further downsampling, so spatial detail survives |
+| **Output** | one `1×1` conv → single channel | the density map, `H/8 × W/8` |
+
+`CSRNet.__init__` initialises everything from a Gaussian (std 0.01), then
+overwrites the frontend with the pretrained VGG16 weights — order matters, or
+the transfer learning is wiped out. `load_weights=True` skips the VGG download
+(useful in tests).
+
+### One training sample — [`image.py`](image.py) → [`dataset.py`](dataset.py)
+
+`ListDataset` holds a list of image paths (from the split JSONs). For each one,
+`load_data`:
+
+1. opens the image as RGB and reads the sibling `.h5` density map
+2. **if training**: takes a random half-size crop and flips horizontally 50 % of
+   the time — and crops the density map by the *same* box, so image and target
+   stay aligned
+3. shrinks the density to `H/8 × W/8` and multiplies by 64, so the sum (the
+   count) survives the resize — this is the step §4 is about
+
+`ListDataset` also replicates the path list 4× when `train=True`, so one
+"epoch" draws four differently-cropped views of each frame.
+
+### The loop — [`train.py`](train.py)
+
+```python
+output = model(img)                    # (B, 1, H/8, W/8)
+loss   = nn.MSELoss(reduction="sum")(output, target)
+```
+
+SGD with momentum 0.95, weight decay 5e-4, fixed LR. Every epoch runs
+`validate()`, which is where the metric comes from:
+
+```python
+mae = mean(|sum(predicted_density) - sum(ground_truth_density)|)
+```
+
+That is **MAE on the count**, not on the pixels — the standard crowd-counting
+metric. The best-MAE checkpoint is copied to `*_model_best.pth.tar`.
+
+Two details worth knowing: `--amp` enables mixed precision on CUDA only (a
+no-op on CPU/MPS), and `--pre` resumes from a checkpoint, restoring epoch,
+optimiser state and best score.
+
+---
+
+## 4. A change in the training path you should know about
 
 `image.py` shrinks the density map to the network's 1/8 output stride and
 multiplies by 64. It did that with `cv2.INTER_CUBIC`, which *samples* the
@@ -157,7 +220,27 @@ itself, which also unbreaks `slurm_scripts/03_biggpu_eval.sh`.
 
 ---
 
-## 4. Running it
+## 5. Running it locally
+
+Useful for inspecting the data and for a short smoke run. Full training wants
+the cluster (§6).
+
+### Set up
+
+```bash
+git clone https://github.com/Motsepe-Jr/CSRNet-crowd-counting.git
+cd CSRNet-crowd-counting
+
+python -m venv .venv
+.venv\Scripts\Activate.ps1          # Windows PowerShell
+# source .venv/bin/activate          # macOS / Linux
+
+pip install -r requirements.txt
+python -c "import torch, torchvision, cv2, scipy, h5py; print(torch.__version__, torch.cuda.is_available())"
+```
+
+If that prints `False` for CUDA you have a CPU-only torch build — fine for
+preparing data and reading code, far too slow for 400 epochs.
 
 ### Download
 
@@ -265,21 +348,150 @@ python scripts/evaluate.py \
     --split-name ucsd_test
 ```
 
-### On the cluster
+---
+
+## 6. Running it on the cluster
+
+This is the path that actually trains the model — a laptop GPU is optional,
+a laptop CPU is not realistic for 400 epochs.
+
+### 6.1 Get the code onto the cluster
 
 ```bash
-PART=UCSD sbatch_pipeline=... ./slurm_scripts/10_submit_csrnet_pipeline.sh
+ssh <you>@<cluster-login-node>
+cd /datasets/<you>            # or wherever you have quota
+git clone https://github.com/Motsepe-Jr/CSRNet-crowd-counting.git
+cd CSRNet-crowd-counting
 ```
 
-`PART=UCSD` routes the prep step to `01_bigbatch_prepare_ucsd.sh` (which
-downloads the archives on the node if they are missing), names the checkpoints
-`ucsd_*`, and defaults `GT_DOWNSAMPLE=area`. `PART=A` / `PART=B` behave exactly
-as before. Extra environment knobs: `UCSD_ROOT`, `UCSD_SCALE`, `UCSD_SIGMA`,
-`UCSD_ROI`, `UCSD_SPLIT`, `UCSD_IMAGE_FORMAT`, `VAL_MODE`, `DOWNLOAD`.
+> There is also [`scripts/cluster_sync_submit.py`](scripts/cluster_sync_submit.py),
+> a paramiko helper that rsync-style uploads the working tree from a laptop and
+> submits in one shot. It predates the repo being on GitHub; `git clone` +
+> `git pull` is simpler now. If you do use it, set `CSR_CLUSTER_HOST`,
+> `CSR_CLUSTER_USER`, `CSR_REMOTE_PROJECT_DIR` and `CSR_CLUSTER_PASSWORD` in
+> your environment — it ships with no defaults on purpose.
+
+### 6.2 Submit the whole chain
+
+One command submits four dependent jobs:
+
+```bash
+PART=UCSD ./slurm_scripts/10_submit_csrnet_pipeline.sh
+```
+
+It prints the job IDs and where the checkpoint will land:
+
+```
+setup_job=123456
+prep_job=123457
+train_job=123458
+eval_job=123459
+run_stem=csrnet_ucsd_20260911_142233
+checkpoint=/…/checkpoints/csrnet_ucsd_20260911_142233/ucsd_model_best.pth.tar
+```
+
+Each job runs only if the previous one succeeded (`--dependency=afterok`), so
+a failure stops the chain instead of training on half-built data.
+
+| # | Script | Partition | Walltime | What it does |
+| --- | --- | --- | --- | --- |
+| 00 | `00_bigbatch_setup_venv.sh` | `bigbatch` | 2 h | builds `.venv-cluster/` (or a conda env), installs torch cu121 + `requirements.txt`, **pre-caches the VGG16 weights** so the GPU node never needs internet |
+| 01 | `01_bigbatch_prepare_ucsd.sh` | `bigbatch` | 4 h | downloads both archives if absent, then runs `prepare_ucsd.py` |
+| 02 | `02_biggpu_train.sh` | `biggpu` | 24 h | `train.py` |
+| 03 | `03_biggpu_eval.sh` | `biggpu` | 4 h | `evaluate.py` on the test split using `*_model_best.pth.tar` |
+
+`PART=UCSD` routes step 01 to the UCSD preparer, names checkpoints `ucsd_*`,
+and defaults `GT_DOWNSAMPLE=area`. `PART=A` / `PART=B` behave exactly as
+before.
+
+### 6.3 Tuning the run
+
+Everything is environment variables — no file edits:
+
+```bash
+PART=UCSD \
+EPOCHS=400 \
+BATCH_SIZE=16 \
+LR=1e-6 \
+WORKERS=8 \
+AMP=true \
+WANDB_API_KEY=<key> \
+  ./slurm_scripts/10_submit_csrnet_pipeline.sh
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `EPOCHS` | `400` | the paper's budget |
+| `BATCH_SIZE` | `16` | safe on UCSD — every frame is the same size |
+| `LR` | `1e-7` | the paper uses `1e-6`; both converge, `1e-7` is slower |
+| `GT_DOWNSAMPLE` | `area` for UCSD | see §4 — don't change it without changing it for eval too |
+| `AMP` | `true` | mixed precision, CUDA only |
+| `PRECHECKPOINT` | — | resume from a checkpoint |
+| `WANDB_API_KEY` | — | if set, `WANDB_MODE` flips to `online` automatically |
+| `UCSD_SIGMA` / `UCSD_SCALE` / `UCSD_ROI` / `UCSD_SPLIT` / `VAL_MODE` / `DOWNLOAD` | see §5 | passed through to `prepare_ucsd.py` |
+
+To re-run training without redoing the 2000-frame conversion, skip the chain
+and submit the one job:
+
+```bash
+PART=UCSD sbatch slurm_scripts/02_biggpu_train.sh
+PART=UCSD sbatch slurm_scripts/03_biggpu_eval.sh
+```
+
+`PART=UCSD` sets `GT_DOWNSAMPLE=area` on its own in both the chain and these
+standalone submissions, so train and eval cannot silently disagree. Setting
+`GT_DOWNSAMPLE` yourself still overrides it — just set it the same way for
+both.
+
+### 6.4 Watching it
+
+```bash
+squeue -u $USER                      # queue state of all four jobs
+tail -f slurm-123458.out             # live training log
+scancel 123458                       # kill one job
+scancel -u $USER                     # kill everything
+```
+
+SLURM writes `slurm-<jobid>.out` into the directory you submitted from. The
+training log looks like this — `Loss` is the summed MSE per batch, `MAE` is the
+count error on the validation split:
+
+```
+epoch 0, processed 0 samples, lr 0.0000010000
+Epoch: [0][0/180]   Time 0.412 (0.412)  Data 0.098 (0.098)  Loss 13.9047 (13.9047)
+begin test
+ * MAE 4.729
+ * best MAE 4.729
+```
+
+### 6.5 Where things land
+
+```
+checkpoints/csrnet_ucsd_<timestamp>/
+├── ucsd_checkpoint.pth.tar     # last epoch
+└── ucsd_model_best.pth.tar     # lowest validation MAE  ← report from this one
+```
+
+### 6.6 When it breaks
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `prep_job` never starts | `setup_job` failed | read `slurm-<setup id>.out`; usually no Python 3.10–3.12 on the node, so it falls back to conda — check `$HOME/miniconda3` exists |
+| Download stalls in step 01 | the UCSD host is slow and plain-HTTP | re-submit; `curl -C -` resumes the partial file |
+| `CUDA out of memory` | `BATCH_SIZE` too high for the node | drop to 8 or 4 |
+| Eval MAE wildly worse than validation MAE | `GT_DOWNSAMPLE` differed between train and eval | re-run eval with the same value |
+| Job killed at 24 h | 400 epochs didn't fit | resume with `PRECHECKPOINT=<path to last checkpoint>` |
+
+### 6.7 What good looks like
+
+The published CSRNet result on UCSD is **MAE 1.16 / MSE 1.47**. Given mean
+occupancy is ~25 people per frame, that is roughly 5 % error. An untrained
+network sits around MAE 4–5 (it predicts near-zero density), so the number to
+watch is the validation MAE falling below ~2 and then grinding towards 1.
 
 ---
 
-## 5. Things worth knowing before you trust the numbers
+## 7. Things worth knowing before you trust the numbers
 
 * **The dot annotations disagree slightly with the shipped counts.** Counting
   points inside the ROI mask gives, on average, **+0.20 people** more than

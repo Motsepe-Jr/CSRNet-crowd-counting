@@ -16,7 +16,7 @@ PART="${PART:-A}"
 DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE:-16}}"
 WORKERS="${WORKERS:-4}"
-GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-cubic}"
+GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-}"
 WANDB_MODE="${WANDB_MODE:-disabled}"
 WANDB_PROJECT="${WANDB_PROJECT:-}"
 WANDB_GROUP="${WANDB_GROUP:-}"
@@ -54,12 +54,17 @@ case "${PART^^}" in
   UCSD)
     DATA_PREFIX="ucsd"
     TASK="${TASK:-ucsd_}"
+    # UCSD density maps use a tight sigma=3 kernel, so area-averaging the
+    # ground truth down to the 1/8 output stride keeps the count exact.
+    GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-area}"
     ;;
   *)
     echo "Unsupported PART=${PART}" >&2
     exit 1
     ;;
 esac
+
+GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-cubic}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_DIR}/checkpoints/${DATA_PREFIX}}"
 EVAL_JSON="${EVAL_JSON:-${DATA_SPLIT_DIR}/${DATA_PREFIX}_test.json}"

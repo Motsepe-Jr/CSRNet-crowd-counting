@@ -24,7 +24,7 @@ WEIGHT_DECAY="${WEIGHT_DECAY:-5e-4}"
 PRINT_FREQ="${PRINT_FREQ:-30}"
 SEED="${SEED:-42}"
 AMP="${AMP:-true}"
-GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-cubic}"
+GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-}"
 PRECHECKPOINT="${PRECHECKPOINT:-}"
 WANDB_MODE="${WANDB_MODE:-disabled}"
 WANDB_PROJECT="${WANDB_PROJECT:-}"
@@ -63,12 +63,17 @@ case "${PART^^}" in
   UCSD)
     DATA_PREFIX="ucsd"
     TASK="${TASK:-ucsd_}"
+    # UCSD density maps use a tight sigma=3 kernel, so area-averaging the
+    # ground truth down to the 1/8 output stride keeps the count exact.
+    GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-area}"
     ;;
   *)
     echo "Unsupported PART=${PART}" >&2
     exit 1
     ;;
 esac
+
+GT_DOWNSAMPLE="${GT_DOWNSAMPLE:-cubic}"
 
 TRAIN_JSON="${TRAIN_JSON:-${DATA_SPLIT_DIR}/${DATA_PREFIX}_train.json}"
 VAL_JSON="${VAL_JSON:-${DATA_SPLIT_DIR}/${DATA_PREFIX}_val.json}"
