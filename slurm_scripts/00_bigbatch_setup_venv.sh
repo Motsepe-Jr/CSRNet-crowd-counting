@@ -12,14 +12,16 @@ PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$(cd -- "${SCRIPT_DIR}/.." && pw
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv-cluster}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-${PROJECT_DIR}/.conda-cluster}"
 PYTHON_BIN="${PYTHON_BIN:-}"
-# cu128 (not cu121): the biggpu nodes carry RTX PRO 6000 Blackwell cards,
-# which are sm_120. A cu121 build cannot initialise against their driver at
-# all - torch.cuda.is_available() returns False and get_arch_list() is empty,
-# so every GPU job dies with "No CUDA GPUs are available". cu128 wheels cover
-# sm_70 through sm_120, so they also still work on the older nodes.
-PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
-TORCH_SPEC="${TORCH_SPEC:-torch>=2.7}"
-TORCHVISION_SPEC="${TORCHVISION_SPEC:-torchvision>=0.22}"
+# Match the driver, not just the GPU generation. The biggpu nodes carry RTX
+# PRO 6000 Blackwell cards (sm_120) whose driver 595.71.05 reports
+# "CUDA Version: 13.2". Measured on mscluster111:
+#   cu121 -> is_available False, arch list []        (no sm_120 at all)
+#   cu128 -> is_available False, device_count 1      (device seen, init fails)
+# so the runtime has to be CUDA 13 as well. Override any of these three to
+# build against a different combination.
+PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+TORCH_SPEC="${TORCH_SPEC:-torch>=2.9}"
+TORCHVISION_SPEC="${TORCHVISION_SPEC:-torchvision>=0.24}"
 TORCH_HOME="${TORCH_HOME:-${HOME}/.cache/torch/csrnet}"
 CONDA_SH="${CONDA_SH:-${HOME}/miniconda3/etc/profile.d/conda.sh}"
 PREFER_CONDA="${PREFER_CONDA:-true}"
