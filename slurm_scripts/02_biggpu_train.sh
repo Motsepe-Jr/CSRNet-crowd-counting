@@ -1,7 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=csrnet_train
 #SBATCH --partition=biggpu
-#SBATCH --exclude=mscluster110
+# Node exclusions come from the sbatch command line (EXCLUDE_NODES in
+# 11_submit_ucsd_sweep.sh) so the list can change without editing this
+# file; a --exclude flag overrides any directive here.
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=24:00:00

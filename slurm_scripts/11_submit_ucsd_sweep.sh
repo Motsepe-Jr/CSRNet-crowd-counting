@@ -29,6 +29,12 @@ SKIP_PREPARE="${SKIP_PREPARE:-false}"
 # Colon-separated job ids this sweep must wait for, e.g. a setup job already
 # running from an earlier submission: WAIT_FOR=65463
 WAIT_FOR="${WAIT_FOR:-}"
+# Nodes whose GPU is unusable. mscluster111 reports "[GPU requires reset]":
+# NVML still enumerates the card and nvidia-smi prints its name, but the
+# driver API cuInit() returns 100 (CUDA_ERROR_NO_DEVICE), so every CUDA job
+# landing there dies whatever CUDA build is installed. Clearing it needs
+# nvidia-smi -r as root.
+EXCLUDE_NODES="${EXCLUDE_NODES:-mscluster110,mscluster111}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 WANDB_PROJECT="${WANDB_PROJECT:-csrnet-crowd-counting}"
@@ -104,6 +110,7 @@ for spec in "${RUNS[@]}"; do
   export WANDB_RUN_NAME="${name}"
   job=$(sbatch --parsable "${prep_deps[@]}" \
     --job-name="csr_${name}" \
+    ${EXCLUDE_NODES:+--exclude="${EXCLUDE_NODES}"} \
     --export=ALL,DATA_PREFIX_OVERRIDE="${prefix}",OPTIMIZER="${opt}",LR="${lr}",OUTPUT_DIR="${out}",TASK="${name}_",$(echo "${extra}" | tr ' ' ',') \
     "${SCRIPT_DIR}/02_biggpu_train.sh")
   echo "train_${name}=${job}   -> ${out}"
@@ -112,7 +119,7 @@ for spec in "${RUNS[@]}"; do
   # tail of each training clip and is not representative - its mean occupancy
   # is 28.5 people against the test split's 24.5 - so test MAE is the number
   # the comparison should be judged on.
-  eval_job=$(sbatch --parsable --dependency=afterok:${job}     --job-name="csreval_${name}"     --export=ALL,DATA_PREFIX_OVERRIDE="${prefix}",OUTPUT_DIR="${out}",TASK="${name}_",SPLIT_NAME="test_${name}"     "${SCRIPT_DIR}/03_biggpu_eval.sh")
+  eval_job=$(sbatch --parsable --dependency=afterok:${job} ${EXCLUDE_NODES:+--exclude="${EXCLUDE_NODES}"}     --job-name="csreval_${name}"     --export=ALL,DATA_PREFIX_OVERRIDE="${prefix}",OUTPUT_DIR="${out}",TASK="${name}_",SPLIT_NAME="test_${name}"     "${SCRIPT_DIR}/03_biggpu_eval.sh")
   echo "eval_${name}=${eval_job}"
 done
 
