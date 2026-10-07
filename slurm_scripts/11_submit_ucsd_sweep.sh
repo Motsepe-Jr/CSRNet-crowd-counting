@@ -26,6 +26,8 @@ DEVICE="${DEVICE:-cuda}"
 AMP="${AMP:-true}"
 SKIP_SETUP="${SKIP_SETUP:-false}"
 SKIP_PREPARE="${SKIP_PREPARE:-false}"
+# Skip the chained test-set evaluation, e.g. to stay under a QOS submit cap.
+SKIP_EVAL="${SKIP_EVAL:-false}"
 # Colon-separated job ids this sweep must wait for, e.g. a setup job already
 # running from an earlier submission: WAIT_FOR=65463
 WAIT_FOR="${WAIT_FOR:-}"
@@ -34,7 +36,11 @@ WAIT_FOR="${WAIT_FOR:-}"
 # driver API cuInit() returns 100 (CUDA_ERROR_NO_DEVICE), so every CUDA job
 # landing there dies whatever CUDA build is installed. Clearing it needs
 # nvidia-smi -r as root.
-EXCLUDE_NODES="${EXCLUDE_NODES:-mscluster110,mscluster111}"
+# mscluster110 was excluded by the original scripts but is healthy as of
+# 2026-10-08: cuInit=0, torch.cuda.is_available() True, and a GPU matmul
+# returns finite values. Probe before trusting an inherited exclusion -
+# excluding a good node here costs a two-day queue wait.
+EXCLUDE_NODES="${EXCLUDE_NODES:-mscluster111}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 WANDB_PROJECT="${WANDB_PROJECT:-csrnet-crowd-counting}"
@@ -119,6 +125,7 @@ for spec in "${RUNS[@]}"; do
   # tail of each training clip and is not representative - its mean occupancy
   # is 28.5 people against the test split's 24.5 - so test MAE is the number
   # the comparison should be judged on.
+  if [[ "${SKIP_EVAL}" == "true" ]]; then continue; fi
   eval_job=$(sbatch --parsable --dependency=afterok:${job} ${EXCLUDE_NODES:+--exclude="${EXCLUDE_NODES}"}     --job-name="csreval_${name}"     --export=ALL,DATA_PREFIX_OVERRIDE="${prefix}",OUTPUT_DIR="${out}",TASK="${name}_",SPLIT_NAME="test_${name}"     "${SCRIPT_DIR}/03_biggpu_eval.sh")
   echo "eval_${name}=${eval_job}"
 done
