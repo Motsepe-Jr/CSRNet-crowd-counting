@@ -109,8 +109,14 @@ def load_data(
 
     if train:
         aug = aug or DEFAULT_AUGMENT
-        crop_w = int(img.size[0] * aug.crop_fraction)
-        crop_h = int(img.size[1] * aug.crop_fraction)
+        # Round the crop down to a multiple of 8. The density map is later
+        # shrunk by 8 and multiplied by 64, which only conserves the count if
+        # the reduction really is 8x. A 316x476 crop becomes 39x59, i.e. a
+        # factor of 8.10 x 8.07, so x64 under-counts every training target by
+        # ~2.1% - while full-frame validation targets stay exact. That silent
+        # train/val mismatch puts a floor under the achievable MAE.
+        crop_w = (int(img.size[0] * aug.crop_fraction) // 8) * 8
+        crop_h = (int(img.size[1] * aug.crop_fraction) // 8) * 8
 
         # With an ROI-masked dataset a uniformly random crop often lands on
         # blacked-out background holding nobody, which contributes gradient
