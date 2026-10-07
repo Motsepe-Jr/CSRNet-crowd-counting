@@ -43,18 +43,19 @@ export WANDB_API_KEY WANDB_PROJECT WANDB_GROUP WANDB_MODE
 export PART=UCSD
 
 # --------------------------------------------------------------- 00 setup
+upstream=()
 deps=""
 if [[ "${SKIP_SETUP}" != "true" ]]; then
   setup_job=$(sbatch --parsable --export=ALL "${SCRIPT_DIR}/00_bigbatch_setup_venv.sh")
   echo "setup_job=${setup_job}"
   deps="--dependency=afterok:${setup_job}"
+  upstream+=("${setup_job}")
 fi
 
 # ------------------------------------------------------ 01 dataset variants
 # sigma 3 is the published CSRNet setting; sigma 8 widens each person's blob to
 # roughly one output pixel, which spreads the gradient over ~8.5% of the target
 # instead of ~2.2% and is the obvious suspect for a plateau.
-prep_deps=()
 if [[ "${SKIP_PREPARE}" != "true" ]]; then
   s3=$(UCSD_SIGMA=3.0 UCSD_PROCESSED_NAME=ucsd_processed UCSD_PREFIX=ucsd \
        sbatch --parsable ${deps} --export=ALL,UCSD_SIGMA=3.0,UCSD_PROCESSED_NAME=ucsd_processed,UCSD_PREFIX=ucsd \
@@ -66,7 +67,14 @@ if [[ "${SKIP_PREPARE}" != "true" ]]; then
        --export=ALL,UCSD_SIGMA=8.0,UCSD_PROCESSED_NAME=ucsd_processed_s8,UCSD_PREFIX=ucsd_s8,DOWNLOAD=false \
        "${SCRIPT_DIR}/01_bigbatch_prepare_ucsd.sh")
   echo "prep_sigma8=${s8}"
-  prep_deps=(--dependency=afterok:${s3}:${s8})
+  upstream+=("${s3}" "${s8}")
+fi
+
+# Training waits on everything upstream - the environment build as well as the
+# data prep. Skipping one stage must not silently drop the other's dependency.
+prep_deps=()
+if (( ${#upstream[@]} > 0 )); then
+  prep_deps=(--dependency=afterok:"$(IFS=:; echo "${upstream[*]}")")
 fi
 
 # ------------------------------------------------------------ 02 the sweep
