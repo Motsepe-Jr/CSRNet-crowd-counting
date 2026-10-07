@@ -9,7 +9,7 @@ import cv2
 import torch
 from torch.utils.data import Dataset
 
-from image import load_data
+from image import Augment, load_data
 
 
 class ListDataset(Dataset):
@@ -34,6 +34,12 @@ class ListDataset(Dataset):
         recipe; ``cv2.INTER_AREA`` conserves the crowd count exactly and is
         the better choice for tight fixed-sigma kernels (see
         :func:`image.load_data`).
+    aug:
+        :class:`image.Augment` describing the training augmentation. ``None``
+        uses the original CSRNet recipe.
+    replicate:
+        How many times to repeat the path list when ``train`` is True. The
+        original recipe is 4, so each epoch sees four random crops per image.
     """
 
     def __init__(
@@ -43,8 +49,10 @@ class ListDataset(Dataset):
         transform: Callable | None = None,
         train: bool = False,
         gt_interpolation: int = cv2.INTER_CUBIC,
+        aug: Augment | None = None,
+        replicate: int = 4,
     ) -> None:
-        paths = list(root) * 4 if train else list(root)
+        paths = list(root) * replicate if train else list(root)
         if shuffle:
             random.shuffle(paths)
 
@@ -52,6 +60,7 @@ class ListDataset(Dataset):
         self.transform = transform
         self.train = train
         self.gt_interpolation = gt_interpolation
+        self.aug = aug
 
     def __len__(self) -> int:
         return len(self.lines)
@@ -61,7 +70,7 @@ class ListDataset(Dataset):
             raise IndexError(index)
 
         img_path = self.lines[index]
-        img, target = load_data(img_path, self.train, self.gt_interpolation)
+        img, target = load_data(img_path, self.train, self.gt_interpolation, self.aug)
 
         if self.transform is not None:
             img = self.transform(img)

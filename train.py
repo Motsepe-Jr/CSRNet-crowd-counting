@@ -14,7 +14,9 @@ Run ``python train.py --help`` for the full list of flags.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import math
 import os
 import random
 import time
@@ -33,10 +35,90 @@ except ImportError:
     wandb = None
 
 import dataset
+from image import Augment
 from model import CSRNet
 from utils import AverageMeter, save_checkpoint, select_device
 
 GT_INTERPOLATIONS = {"cubic": cv2.INTER_CUBIC, "area": cv2.INTER_AREA}
+
+
+def autocast(device_type: str, enabled: bool):
+    """``torch.amp.autocast`` where available, otherwise a no-op context."""
+    amp_module = getattr(torch, "amp", None)
+    if amp_module is not None and hasattr(amp_module, "autocast"):
+        return amp_module.autocast(device_type=device_type, enabled=enabled)
+    return contextlib.nullcontext()
+
+
+def build_grad_scaler(device_type: str, enabled: bool):
+    """AMP scaler that works across torch versions.
+
+    ``torch.amp.GradScaler`` only exists from torch 2.1; older builds have
+    ``torch.cuda.amp.GradScaler``. Hardcoding the former makes the script
+    unrunnable on torch 2.0, including CPU-only laptops.
+    """
+    amp_module = getattr(torch, "amp", None)
+    if amp_module is not None and hasattr(amp_module, "GradScaler"):
+        return amp_module.GradScaler(device_type, enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.Optimizer:
+    if args.optimizer == "sgd":
+        return torch.optim.SGD(
+            model.parameters(),
+            lr=args.lr,
+            momentum=args.momentum,
+            weight_decay=args.weight_decay,
+        )
+    if args.optimizer == "adam":
+        return torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if args.optimizer == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    raise ValueError(f"unknown optimizer {args.optimizer!r}")
+
+
+def lr_at_epoch(epoch: int, args: argparse.Namespace) -> float:
+    """Learning rate for ``epoch``, including any warm-up.
+
+    The original code multiplied the LR by ``scales = [1, 1, 1, 1]``, i.e. it
+    never decayed at all - a fixed LR dressed up as a schedule. These are real
+    schedules.
+    """
+    base = args.lr
+
+    if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
+        # Linear warm-up from 10% of base avoids the large first steps that
+        # wreck a pretrained frontend.
+        return base * (0.1 + 0.9 * (epoch + 1) / args.warmup_epochs)
+
+    if args.lr_schedule == "none":
+        return base
+
+    progress_epoch = epoch - args.warmup_epochs
+    total = max(1, args.epochs - args.warmup_epochs)
+
+    if args.lr_schedule == "cosine":
+        return args.lr_min + 0.5 * (base - args.lr_min) * (
+            1.0 + math.cos(math.pi * min(progress_epoch / total, 1.0))
+        )
+
+    if args.lr_schedule == "step":
+        decayed = base
+        for milestone in args.lr_decay_epochs:
+            if epoch >= milestone:
+                decayed *= args.lr_decay_factor
+        return max(decayed, args.lr_min)
+
+    raise ValueError(f"unknown lr schedule {args.lr_schedule!r}")
+
+
+def grad_global_norm(model: nn.Module) -> float:
+    total = 0.0
+    for param in model.parameters():
+        if param.grad is not None:
+            total += float(param.grad.detach().pow(2).sum())
+    return total ** 0.5
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +161,96 @@ def build_parser() -> argparse.ArgumentParser:
             "the crowd count exactly and suits tight kernels (UCSD, sigma=3)"
         ),
     )
+    # ---- optimisation -------------------------------------------------
+    parser.add_argument(
+        "--optimizer",
+        choices=("sgd", "adam", "adamw"),
+        default="sgd",
+        help="sgd reproduces the paper; adam converges far more reliably here",
+    )
+    parser.add_argument(
+        "--loss-norm",
+        choices=("sum", "batch-mean"),
+        default="batch-mean",
+        help=(
+            "how the summed squared error is scaled before backprop. "
+            "'sum' is what this repo did: the gradient then grows linearly "
+            "with batch size, so a recipe tuned at batch 1 diverges at batch "
+            "16. 'batch-mean' divides by 2N, which is the loss the CSRNet "
+            "paper actually defines, and makes lr independent of batch size"
+        ),
+    )
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("none", "step", "cosine"),
+        default="cosine",
+        help="'none' is the paper's fixed LR; cosine anneals to --lr-min",
+    )
+    parser.add_argument("--lr-min", type=float, default=0.0, help="floor for the LR schedule")
+    parser.add_argument(
+        "--lr-decay-epochs",
+        type=int,
+        nargs="*",
+        default=[200, 300],
+        help="epochs at which --lr-schedule step multiplies the LR",
+    )
+    parser.add_argument("--lr-decay-factor", type=float, default=0.1)
+    parser.add_argument(
+        "--warmup-epochs",
+        type=int,
+        default=0,
+        help="linearly ramp the LR over this many epochs before the schedule",
+    )
+    parser.add_argument(
+        "--clip-grad",
+        type=float,
+        default=0.0,
+        help="clip the global gradient norm to this value (0 disables)",
+    )
+
+    # ---- augmentation --------------------------------------------------
+    parser.add_argument(
+        "--crop-fraction",
+        type=float,
+        default=0.5,
+        help="fraction of each side kept by the random training crop",
+    )
+    parser.add_argument("--no-hflip", action="store_true", help="disable the random horizontal flip")
+    parser.add_argument(
+        "--aug-brightness",
+        type=float,
+        default=0.0,
+        help="random brightness jitter, e.g. 0.2 scales pixels by [0.8, 1.2]",
+    )
+    parser.add_argument(
+        "--aug-contrast",
+        type=float,
+        default=0.0,
+        help="random contrast jitter around the patch mean",
+    )
+    parser.add_argument(
+        "--aug-noise",
+        type=float,
+        default=0.0,
+        help="gaussian pixel noise sigma, in 0-255 units",
+    )
+    parser.add_argument(
+        "--min-crop-density",
+        type=float,
+        default=0.0,
+        help=(
+            "resample a training crop until it holds at least this many "
+            "people (max 8 tries). Useful on ROI-masked data where many "
+            "random crops are entirely background"
+        ),
+    )
+    parser.add_argument(
+        "--replicate",
+        type=int,
+        default=4,
+        help="how many random crops per image per epoch (original recipe: 4)",
+    )
+
     parser.add_argument(
         "--wandb",
         action="store_true",
@@ -135,11 +307,7 @@ def main() -> None:
             )
             print(f"Logging to W&B project '{args.wandb_project}'")
 
-    # Step schedule used by adjust_learning_rate (kept identical to the
-    # original recipe).
     args.original_lr = args.lr
-    args.steps = [-1, 1, 100, 150]
-    args.scales = [1, 1, 1, 1]
 
     set_seed(args.seed)
     device = select_device(args.device)
@@ -157,15 +325,10 @@ def main() -> None:
 
     model = CSRNet().to(device)
     criterion = nn.MSELoss(reduction="sum").to(device)
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=args.lr,
-        momentum=args.momentum,
-        weight_decay=args.weight_decay,
-    )
+    optimizer = build_optimizer(model, args)
 
     use_amp = args.amp and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    scaler = build_grad_scaler(device.type, enabled=use_amp)
 
     best_prec1 = float("inf")
     if args.pre:
@@ -182,9 +345,14 @@ def main() -> None:
             print(f"=> no checkpoint found at '{args.pre}'")
 
     for epoch in range(args.start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch, args)
+        args.lr = lr_at_epoch(epoch, args)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = args.lr
 
-        train(train_list, model, criterion, optimizer, epoch, args, device, scaler, use_amp, wandb_run)
+        train_loss = train(
+            train_list, model, criterion, optimizer, epoch, args, device,
+            scaler, use_amp, wandb_run,
+        )
         if val_list is not None:
             prec1, rmse = validate(val_list, model, args, device, wandb_run, epoch)
             is_best = prec1 < best_prec1
@@ -221,8 +389,10 @@ def train(
     scaler: torch.amp.GradScaler,
     use_amp: bool,
     wandb_run=None,
-) -> None:
+) -> float:
     losses = AverageMeter()
+    per_sample = AverageMeter()
+    grad_norms = AverageMeter()
     batch_time = AverageMeter()
     data_time = AverageMeter()
 
@@ -241,6 +411,15 @@ def train(
             ),
             train=True,
             gt_interpolation=GT_INTERPOLATIONS[args.gt_downsample],
+            aug=Augment(
+                crop_fraction=args.crop_fraction,
+                hflip=not args.no_hflip,
+                brightness=args.aug_brightness,
+                contrast=args.aug_contrast,
+                noise_std=args.aug_noise,
+                min_crop_density=args.min_crop_density,
+            ),
+            replicate=args.replicate,
         ),
         batch_size=args.batch_size,
         num_workers=args.workers,
@@ -260,19 +439,40 @@ def train(
         target = target.float().unsqueeze(1).to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-            output = model(img) # H, W, 1, B
-            loss = criterion(output, target)
+        with autocast(device.type, use_amp):
+            output = model(img)
+            sse = criterion(output, target)
+            # The paper's loss is (1/2N) * sum ||pred - gt||^2. Summing without
+            # dividing lets the gradient scale with batch size, so an lr tuned
+            # at batch 1 takes ~19x larger steps at batch 16 and diverges.
+            loss = sse / (2 * img.size(0)) if args.loss_norm == "batch-mean" else sse
 
         if use_amp:
             scaler.scale(loss).backward()
+            if args.clip_grad > 0:
+                scaler.unscale_(optimizer)
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+                )
+            else:
+                grad_norm = grad_global_norm(model)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
+            if args.clip_grad > 0:
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+                )
+            else:
+                grad_norm = grad_global_norm(model)
             optimizer.step()
 
+        # Track per-sample SSE as well: unlike the optimised loss it is
+        # comparable across batch sizes and --loss-norm settings.
         losses.update(loss.item(), img.size(0))
+        per_sample.update(sse.item() / img.size(0), img.size(0))
+        grad_norms.update(grad_norm)
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -280,8 +480,10 @@ def train(
             print(
                 f"Epoch: [{epoch}][{i}/{len(train_loader)}]\t"
                 f"Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
-                f"Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
                 f"Loss {losses.val:.4f} ({losses.avg:.4f})\t"
+                f"SSE/sample {per_sample.val:.3f} ({per_sample.avg:.3f})\t"
+                f"|grad| {grad_norms.val:.2f}\t"
+                f"lr {args.lr:.3e}"
             )
 
             # Log to W&B if enabled
@@ -291,12 +493,17 @@ def train(
                     "batch": epoch * len(train_loader) + i,
                     "train/loss": losses.val,
                     "train/loss_avg": losses.avg,
+                    "train/sse_per_sample": per_sample.val,
+                    "train/sse_per_sample_avg": per_sample.avg,
+                    "train/grad_norm": grad_norms.val,
                     "train/batch_time": batch_time.val,
                     "train/batch_time_avg": batch_time.avg,
                     "train/data_time": data_time.val,
                     "train/data_time_avg": data_time.avg,
                     "learning_rate": args.lr,
                 })
+
+    return per_sample.avg
 
 
 @torch.no_grad()
@@ -362,25 +569,6 @@ def validate(
         })
 
     return mae, rmse
-
-
-def adjust_learning_rate(
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-    args: argparse.Namespace,
-) -> None:
-    """Decay the LR following ``args.steps`` / ``args.scales`` schedule."""
-    args.lr = args.original_lr
-    for i in range(len(args.steps)):
-        scale = args.scales[i] if i < len(args.scales) else 1
-        if epoch >= args.steps[i]:
-            args.lr = args.lr * scale
-            if epoch == args.steps[i]:
-                break
-        else:
-            break
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = args.lr
 
 
 if __name__ == "__main__":

@@ -3,12 +3,59 @@
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import h5py
 import numpy as np
 from PIL import Image
+
+
+@dataclass(frozen=True)
+class Augment:
+    """Training-time augmentation knobs.
+
+    The defaults reproduce the original CSRNet recipe exactly: a random
+    half-size crop plus a 50% horizontal flip, nothing else.
+
+    The photometric options (``brightness``, ``contrast``, ``noise_std``)
+    only touch pixels, never the density map, so the crowd count is
+    unaffected by construction. That matters: anything that rescales the
+    image geometrically would also have to rescale the density *values* to
+    keep the integral right, which is why no zoom augmentation is offered
+    here.
+    """
+
+    crop_fraction: float = 0.5      # fraction of each side kept when cropping
+    hflip: bool = True
+    brightness: float = 0.0         # +/- fraction, e.g. 0.2 -> x[0.8, 1.2]
+    contrast: float = 0.0           # +/- fraction around the patch mean
+    noise_std: float = 0.0          # gaussian sigma in 0-255 units
+    min_crop_density: float = 0.0   # resample a crop holding < this many people
+
+    @property
+    def photometric(self) -> bool:
+        return bool(self.brightness or self.contrast or self.noise_std)
+
+
+DEFAULT_AUGMENT = Augment()
+
+
+def _photometric(img: Image.Image, aug: Augment) -> Image.Image:
+    """Brightness / contrast jitter and gaussian noise, in that order."""
+    arr = np.asarray(img, dtype=np.float32)
+
+    if aug.brightness:
+        arr *= 1.0 + random.uniform(-aug.brightness, aug.brightness)
+    if aug.contrast:
+        factor = 1.0 + random.uniform(-aug.contrast, aug.contrast)
+        mean = arr.mean()
+        arr = (arr - mean) * factor + mean
+    if aug.noise_std:
+        arr += np.random.normal(0.0, aug.noise_std, arr.shape).astype(np.float32)
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
 def _ground_truth_path(img_path: str | Path) -> Path:
@@ -33,6 +80,7 @@ def load_data(
     img_path: str | Path,
     train: bool = True,
     interpolation: int = cv2.INTER_CUBIC,
+    aug: Augment | None = None,
 ):
     """Load an RGB image and its density map ground truth.
 
@@ -48,8 +96,9 @@ def load_data(
     instead, so ``x64`` restores the count exactly - worth using for
     fixed-sigma datasets with tight kernels such as UCSD (sigma = 3).
 
-    When ``train`` is True, applies a random half-size crop and a 50% chance
-    horizontal flip, as in the original CSRNet recipe.
+    When ``train`` is True, applies the augmentation described by ``aug``
+    (see :class:`Augment`); the default reproduces the original CSRNet
+    recipe of a random half-size crop and a 50% horizontal flip.
     """
     img_path = Path(img_path)
     gt_path = _ground_truth_path(img_path)
@@ -59,16 +108,31 @@ def load_data(
         target = np.asarray(gt_file["density"], dtype=np.float32)
 
     if train:
-        crop_w, crop_h = img.size[0] // 2, img.size[1] // 2
-        dx = int(random.random() * (img.size[0] - crop_w))
-        dy = int(random.random() * (img.size[1] - crop_h))
+        aug = aug or DEFAULT_AUGMENT
+        crop_w = int(img.size[0] * aug.crop_fraction)
+        crop_h = int(img.size[1] * aug.crop_fraction)
+
+        # With an ROI-masked dataset a uniformly random crop often lands on
+        # blacked-out background holding nobody, which contributes gradient
+        # for "predict zero" and nothing else. Retry a few times for a crop
+        # that actually contains people before giving up.
+        attempts = 8 if aug.min_crop_density > 0 else 1
+        for attempt in range(attempts):
+            dx = int(random.random() * (img.size[0] - crop_w))
+            dy = int(random.random() * (img.size[1] - crop_h))
+            window = target[dy : dy + crop_h, dx : dx + crop_w]
+            if attempt == attempts - 1 or window.sum() >= aug.min_crop_density:
+                break
 
         img = img.crop((dx, dy, dx + crop_w, dy + crop_h))
-        target = target[dy : dy + crop_h, dx : dx + crop_w]
+        target = window
 
-        if random.random() > 0.5:
+        if aug.hflip and random.random() > 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
             target = np.fliplr(target).copy()
+
+        if aug.photometric:
+            img = _photometric(img, aug)
 
     new_w = target.shape[1] // 8
     new_h = target.shape[0] // 8
