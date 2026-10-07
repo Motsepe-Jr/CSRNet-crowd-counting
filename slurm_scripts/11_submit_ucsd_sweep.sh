@@ -26,6 +26,9 @@ DEVICE="${DEVICE:-cuda}"
 AMP="${AMP:-true}"
 SKIP_SETUP="${SKIP_SETUP:-false}"
 SKIP_PREPARE="${SKIP_PREPARE:-false}"
+# Colon-separated job ids this sweep must wait for, e.g. a setup job already
+# running from an earlier submission: WAIT_FOR=65463
+WAIT_FOR="${WAIT_FOR:-}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 WANDB_PROJECT="${WANDB_PROJECT:-csrnet-crowd-counting}"
@@ -44,12 +47,18 @@ export PART=UCSD
 
 # --------------------------------------------------------------- 00 setup
 upstream=()
+if [[ -n "${WAIT_FOR}" ]]; then
+  IFS=':' read -r -a wait_ids <<< "${WAIT_FOR}"
+  upstream+=("${wait_ids[@]}")
+fi
 deps=""
 if [[ "${SKIP_SETUP}" != "true" ]]; then
   setup_job=$(sbatch --parsable --export=ALL "${SCRIPT_DIR}/00_bigbatch_setup_venv.sh")
   echo "setup_job=${setup_job}"
   deps="--dependency=afterok:${setup_job}"
   upstream+=("${setup_job}")
+elif [[ -n "${WAIT_FOR}" ]]; then
+  deps="--dependency=afterok:${WAIT_FOR}"
 fi
 
 # ------------------------------------------------------ 01 dataset variants
