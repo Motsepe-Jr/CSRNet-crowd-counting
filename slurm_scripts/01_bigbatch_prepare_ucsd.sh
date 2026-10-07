@@ -18,6 +18,8 @@ UCSD_SIGMA="${UCSD_SIGMA:-3.0}"
 UCSD_ROI="${UCSD_ROI:-mask}"
 UCSD_SPLIT="${UCSD_SPLIT:-standard}"
 UCSD_IMAGE_FORMAT="${UCSD_IMAGE_FORMAT:-png}"
+UCSD_PROCESSED_NAME="${UCSD_PROCESSED_NAME:-ucsd_processed}"
+UCSD_PREFIX="${UCSD_PREFIX:-ucsd}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
 VAL_MODE="${VAL_MODE:-contiguous}"
 SEED="${SEED:-42}"
@@ -75,6 +77,8 @@ ARGS=(
   --val-mode "${VAL_MODE}"
   --seed "${SEED}"
   --image-format "${UCSD_IMAGE_FORMAT}"
+  --processed-name "${UCSD_PROCESSED_NAME}"
+  --prefix "${UCSD_PREFIX}"
 )
 
 if [[ "${FORCE_REBUILD}" == "true" ]]; then

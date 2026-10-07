@@ -257,6 +257,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable Weights & Biases logging",
     )
     parser.add_argument(
+        "--wandb-mode",
+        choices=("disabled", "online", "offline"),
+        default="disabled",
+        help="anything but 'disabled' also switches W&B on (used by the SLURM scripts)",
+    )
+    parser.add_argument("--wandb-group", default="", help="W&B run group, for grouping a sweep")
+    parser.add_argument("--wandb-run-name", default="", help="W&B run name")
+    parser.add_argument("--wandb-tags", default="", help="comma-separated W&B tags")
+    parser.add_argument(
         "--wandb-project",
         default="csrnet-crowd-counting",
         help="Weights & Biases project name",
@@ -282,16 +291,28 @@ def main() -> None:
 
     # Initialize Weights & Biases if enabled
     wandb_run = None
-    if args.wandb:
+    wandb_enabled = args.wandb or args.wandb_mode != "disabled"
+    if wandb_enabled:
         if wandb is None:
             print("WARNING: wandb not installed; skipping W&B logging")
             print("Install with: pip install wandb")
         else:
             print("Initializing Weights & Biases logging...")
             print(f"Project: {args.wandb_project}, Entity: {args.wandb_entity}")
+            init_kwargs = {
+                "project": args.wandb_project,
+                "entity": args.wandb_entity,
+                "mode": args.wandb_mode if args.wandb_mode != "disabled" else "online",
+            }
+            if args.wandb_group:
+                init_kwargs["group"] = args.wandb_group
+            if args.wandb_run_name:
+                init_kwargs["name"] = args.wandb_run_name
+            tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+            if tags:
+                init_kwargs["tags"] = tags
             wandb_run = wandb.init(
-                project=args.wandb_project,
-                entity=args.wandb_entity,
+                **init_kwargs,
                 config={
                     "learning_rate": args.lr,
                     "momentum": args.momentum,
@@ -303,6 +324,18 @@ def main() -> None:
                     "gt_downsample": args.gt_downsample,
                     "task": args.task,
                     "no_validation": args.no_validation,
+                    "optimizer": args.optimizer,
+                    "loss_norm": args.loss_norm,
+                    "lr_schedule": args.lr_schedule,
+                    "warmup_epochs": args.warmup_epochs,
+                    "clip_grad": args.clip_grad,
+                    "crop_fraction": args.crop_fraction,
+                    "replicate": args.replicate,
+                    "aug_brightness": args.aug_brightness,
+                    "aug_contrast": args.aug_contrast,
+                    "aug_noise": args.aug_noise,
+                    "min_crop_density": args.min_crop_density,
+                    "train_json": args.train_json,
                 },
             )
             print(f"Logging to W&B project '{args.wandb_project}'")
