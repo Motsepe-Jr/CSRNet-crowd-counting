@@ -17,6 +17,19 @@ def select_device(preferred: str | None = None) -> torch.device:
     then Apple MPS, then CPU.
     """
     if preferred and preferred.lower() != "auto":
+        if preferred.lower().startswith("cuda") and not torch.cuda.is_available():
+            # Fail here with something actionable rather than 40 lines of stack
+            # trace from the first .to(device). The usual cause is a torch build
+            # whose CUDA version predates the node's GPU: a cu121 wheel on an
+            # sm_120 Blackwell card reports no devices at all.
+            raise RuntimeError(
+                f"--device {preferred} was requested but torch reports no CUDA "
+                f"devices.\n"
+                f"  torch {torch.__version__}, built for CUDA {torch.version.cuda}\n"
+                f"  compiled architectures: {torch.cuda.get_arch_list() or '(none)'}\n"
+                "If the node does have a GPU, the torch build is probably too old "
+                "for it; rebuild the environment against a matching CUDA version."
+            )
         return torch.device(preferred)
     if torch.cuda.is_available():
         return torch.device("cuda")

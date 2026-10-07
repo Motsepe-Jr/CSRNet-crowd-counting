@@ -12,7 +12,14 @@ PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$(cd -- "${SCRIPT_DIR}/.." && pw
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv-cluster}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-${PROJECT_DIR}/.conda-cluster}"
 PYTHON_BIN="${PYTHON_BIN:-}"
-PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+# cu128 (not cu121): the biggpu nodes carry RTX PRO 6000 Blackwell cards,
+# which are sm_120. A cu121 build cannot initialise against their driver at
+# all - torch.cuda.is_available() returns False and get_arch_list() is empty,
+# so every GPU job dies with "No CUDA GPUs are available". cu128 wheels cover
+# sm_70 through sm_120, so they also still work on the older nodes.
+PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+TORCH_SPEC="${TORCH_SPEC:-torch>=2.7}"
+TORCHVISION_SPEC="${TORCHVISION_SPEC:-torchvision>=0.22}"
 TORCH_HOME="${TORCH_HOME:-${HOME}/.cache/torch/csrnet}"
 CONDA_SH="${CONDA_SH:-${HOME}/miniconda3/etc/profile.d/conda.sh}"
 PREFER_CONDA="${PREFER_CONDA:-true}"
@@ -79,7 +86,7 @@ else
 fi
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --index-url "${PYTORCH_INDEX_URL}" "torch>=2.2,<2.3" "torchvision>=0.17,<0.18"
+python -m pip install --index-url "${PYTORCH_INDEX_URL}" "${TORCH_SPEC}" "${TORCHVISION_SPEC}"
 python -m pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless >/dev/null 2>&1 || true
 python -m pip install -r requirements.txt
 python -m pip install --upgrade --force-reinstall "numpy>=1.26,<2" "scipy>=1.11" "opencv-python-headless>=4.9"
@@ -91,10 +98,12 @@ import torchvision
 import numpy
 import cv2
 
-print("torch", torch.__version__)
+print("torch", torch.__version__, "built for CUDA", torch.version.cuda)
 print("torchvision", torchvision.__version__)
 print("numpy", numpy.__version__)
 print("cv2", cv2.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("arch list:", torch.cuda.get_arch_list())
 PY
 
 python - <<'PY'
