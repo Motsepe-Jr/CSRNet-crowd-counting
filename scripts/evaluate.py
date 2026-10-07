@@ -58,7 +58,9 @@ def build_transform():
 
 
 @torch.no_grad()
-def evaluate(eval_list: list[str], model: torch.nn.Module, args, device: torch.device) -> float:
+def evaluate(
+    eval_list: list[str], model: torch.nn.Module, args, device: torch.device
+) -> tuple[float, float]:
     loader = DataLoader(
         dataset.ListDataset(
             eval_list,
@@ -75,7 +77,8 @@ def evaluate(eval_list: list[str], model: torch.nn.Module, args, device: torch.d
         raise ValueError("evaluation list is empty")
 
     model.eval()
-    abs_err = 0.0
+    absolute_error = 0.0
+    squared_error = 0.0
     n_samples = 0
 
     for img, target in loader:
@@ -85,10 +88,14 @@ def evaluate(eval_list: list[str], model: torch.nn.Module, args, device: torch.d
 
         pred_counts = output.flatten(1).sum(dim=1)
         gt_counts = target.flatten(1).sum(dim=1)
-        abs_err += (pred_counts - gt_counts).abs().sum().item()
+        count_error = pred_counts - gt_counts
+        absolute_error += count_error.abs().sum().item()
+        squared_error += count_error.square().sum().item()
         n_samples += img.size(0)
 
-    return abs_err / n_samples
+    mae = absolute_error / n_samples
+    rmse = float(torch.sqrt(torch.tensor(squared_error / n_samples)).item())
+    return mae, rmse
 
 
 def main() -> None:
@@ -120,12 +127,13 @@ def main() -> None:
         job_type="eval",
     )
 
-    mae = evaluate(eval_list, model, args, device)
-    print(f" * {args.split_name} MAE {mae:.3f}")
+    mae, rmse = evaluate(eval_list, model, args, device)
+    print(f" * {args.split_name} MAE {mae:.3f} RMSE {rmse:.3f}")
 
     if wandb_run is not None:
-        wandb_run.log({"eval/mae": mae})
+        wandb_run.log({"eval/mae": mae, "eval/rmse": rmse})
         wandb_run.summary["eval_mae"] = mae
+        wandb_run.summary["eval_rmse"] = rmse
         wandb_run.summary["split_name"] = args.split_name
         wandb_run.summary["checkpoint"] = args.checkpoint
         wandb_run.finish()
