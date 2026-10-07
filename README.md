@@ -72,13 +72,29 @@ python scripts/prepare_ucsd.py --dataset-root UCSD_Crowd_Counting_Dataset \
 python train.py --train-json data_splits/ucsd_train.json \
                 --val-json   data_splits/ucsd_val.json \
                 --task checkpoints/ucsd/ucsd_ \
-                --gt-downsample area --batch-size 16 --lr 1e-6 --device cuda --amp
+                --gt-downsample area --optimizer adam --lr 1e-5 \n                --lr-schedule cosine --clip-grad 5 \n                --batch-size 16 --device cuda --amp
 ```
 
 ![UCSD frames and their density maps](docs/ucsd_preview.png)
 
 Every UCSD frame is the same size, so batches larger than 1 work — unlike
 ShanghaiTech, whose images vary in resolution and need `--batch-size 1`.
+
+Or run the whole comparison — two kernel widths x optimiser x augmentation,
+all reporting into one Weights & Biases group:
+
+```bash
+WANDB_API_KEY=... ./slurm_scripts/11_submit_ucsd_sweep.sh
+```
+
+**Batch size and learning rate.** `--loss-norm batch-mean` (the default)
+divides the summed squared error by `2N`, which is the loss the CSRNet paper
+actually defines. It matters: under the old unnormalised `sum`, the gradient
+grew linearly with the batch — measured at 13.7 for batch 1 and 264.5 for
+batch 16 — so a learning rate tuned at batch 1 took roughly 19x larger steps
+at batch 16 and the loss climbed instead of falling. With `batch-mean` the
+gradient norm stays near 10 across batch sizes, so lr is yours to set
+independently of the batch.
 
 ### Evaluate
 
