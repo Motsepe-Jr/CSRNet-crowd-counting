@@ -87,8 +87,14 @@ def lr_at_epoch(epoch: int, args: argparse.Namespace) -> float:
     The original code multiplied the LR by ``scales = [1, 1, 1, 1]``, i.e. it
     never decayed at all - a fixed LR dressed up as a schedule. These are real
     schedules.
+
+    The base is ``args.original_lr``, never ``args.lr``. The caller assigns the
+    result back to ``args.lr`` for logging, so reading the base from there
+    would apply the curve to an already-decayed value and compound it every
+    epoch - cosine over 400 epochs then reaches 2.4e-7 by epoch 89 instead of
+    8.8e-6, and training stalls long before the schedule intended.
     """
-    base = args.lr
+    base = args.original_lr
 
     if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
         # Linear warm-up from 10% of base avoids the large first steps that
