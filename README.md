@@ -72,7 +72,9 @@ python scripts/prepare_ucsd.py --dataset-root UCSD_Crowd_Counting_Dataset \
 python train.py --train-json data_splits/ucsd_train.json \
                 --val-json   data_splits/ucsd_val.json \
                 --task checkpoints/ucsd/ucsd_ \
-                --gt-downsample area --optimizer adam --lr 1e-5 \n                --lr-schedule cosine --clip-grad 5 \n                --batch-size 16 --device cuda --amp
+                --gt-downsample area --optimizer adam --lr 1e-5 \
+                --lr-schedule cosine --clip-grad 5 \
+                --batch-size 16 --device cuda --amp
 ```
 
 ![UCSD frames and their density maps](docs/ucsd_preview.png)
