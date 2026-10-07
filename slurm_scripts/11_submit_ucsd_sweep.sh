@@ -100,11 +100,21 @@ fi
 
 # ------------------------------------------------------------ 02 the sweep
 # name | data prefix | optimizer | lr | extra env
+# Adam arms first: they are the ones expected to converge, and the QOS cap
+# runs these sequentially, so the informative result should not sit behind
+# the slow baseline.
+#
+# The SGD arm uses lr 1.6e-5, not the paper's 1e-6. With --loss-norm
+# batch-mean the gradient norm is batch-independent, but the number of
+# optimiser steps is not: the paper takes 2880 steps per epoch at batch 1,
+# batch 16 takes 180. Same step size, 16x fewer steps, so lr scales by the
+# batch ratio. At 1e-6 the loss sat at the predict-zero value (SSE/sample
+# 3.7) for 44 epochs without moving.
 RUNS=(
-  "sgd_sigma3|ucsd|sgd|1e-6|LR_SCHEDULE=cosine CLIP_GRAD=0"
   "adam_sigma3|ucsd|adam|1e-5|LR_SCHEDULE=cosine CLIP_GRAD=5"
   "adam_sigma8|ucsd_s8|adam|1e-5|LR_SCHEDULE=cosine CLIP_GRAD=5"
   "adam_sigma8_aug|ucsd_s8|adam|1e-5|LR_SCHEDULE=cosine CLIP_GRAD=5 AUG_BRIGHTNESS=0.2 AUG_CONTRAST=0.2 AUG_NOISE=3 MIN_CROP_DENSITY=2"
+  "sgd_sigma3|ucsd|sgd|1.6e-5|LR_SCHEDULE=cosine CLIP_GRAD=0"
 )
 
 for spec in "${RUNS[@]}"; do
