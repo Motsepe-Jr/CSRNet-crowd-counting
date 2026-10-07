@@ -107,6 +107,13 @@ for spec in "${RUNS[@]}"; do
     --export=ALL,DATA_PREFIX_OVERRIDE="${prefix}",OPTIMIZER="${opt}",LR="${lr}",OUTPUT_DIR="${out}",TASK="${name}_",$(echo "${extra}" | tr ' ' ',') \
     "${SCRIPT_DIR}/02_biggpu_train.sh")
   echo "train_${name}=${job}   -> ${out}"
+
+  # Score every run on the 1200-frame test split. The validation split is the
+  # tail of each training clip and is not representative - its mean occupancy
+  # is 28.5 people against the test split's 24.5 - so test MAE is the number
+  # the comparison should be judged on.
+  eval_job=$(sbatch --parsable --dependency=afterok:${job}     --job-name="csreval_${name}"     --export=ALL,DATA_PREFIX_OVERRIDE="${prefix}",OUTPUT_DIR="${out}",TASK="${name}_",SPLIT_NAME="test_${name}"     "${SCRIPT_DIR}/03_biggpu_eval.sh")
+  echo "eval_${name}=${eval_job}"
 done
 
 echo
