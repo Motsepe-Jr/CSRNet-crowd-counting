@@ -42,11 +42,14 @@ from utils import AverageMeter, save_checkpoint, select_device
 GT_INTERPOLATIONS = {"cubic": cv2.INTER_CUBIC, "area": cv2.INTER_AREA}
 
 
-def autocast(device_type: str, enabled: bool):
+def autocast(device_type: str, enabled: bool, dtype=None):
     """``torch.amp.autocast`` where available, otherwise a no-op context."""
     amp_module = getattr(torch, "amp", None)
     if amp_module is not None and hasattr(amp_module, "autocast"):
-        return amp_module.autocast(device_type=device_type, enabled=enabled)
+        kwargs = {"device_type": device_type, "enabled": enabled}
+        if dtype is not None:
+            kwargs["dtype"] = dtype
+        return amp_module.autocast(**kwargs)
     return contextlib.nullcontext()
 
 
@@ -150,6 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--amp",
         action="store_true",
         help="enable torch.amp mixed-precision (CUDA only; no-op on CPU/MPS)",
+    )
+    parser.add_argument(
+        "--amp-dtype",
+        choices=("bfloat16", "float16"),
+        default="bfloat16",
+        help=(
+            "autocast dtype when --amp is set. bfloat16 has the same exponent "
+            "range as float32, so it needs no loss scaling and cannot overflow "
+            "the way float16 does; float16 reproduces the older behaviour"
+        ),
     )
     parser.add_argument(
         "--gt-downsample",
@@ -321,6 +334,7 @@ def main() -> None:
                     "epochs": args.epochs,
                     "device": args.device,
                     "amp": args.amp,
+                    "amp_dtype": args.amp_dtype,
                     "gt_downsample": args.gt_downsample,
                     "task": args.task,
                     "no_validation": args.no_validation,
@@ -361,7 +375,12 @@ def main() -> None:
     optimizer = build_optimizer(model, args)
 
     use_amp = args.amp and device.type == "cuda"
-    scaler = build_grad_scaler(device.type, enabled=use_amp)
+    # Loss scaling exists to stop float16 underflowing. bfloat16 keeps float32's
+    # exponent range, so the scaler is left disabled for it and the AMP branch
+    # degrades to a plain backward/step.
+    scaler = build_grad_scaler(
+        device.type, enabled=use_amp and args.amp_dtype == "float16"
+    )
 
     best_prec1 = float("inf")
     if args.pre:
@@ -423,6 +442,8 @@ def train(
     use_amp: bool,
     wandb_run=None,
 ) -> float:
+    amp_dtype = torch.bfloat16 if args.amp_dtype == "bfloat16" else torch.float16
+
     losses = AverageMeter()
     per_sample = AverageMeter()
     grad_norms = AverageMeter()
@@ -472,7 +493,7 @@ def train(
         target = target.float().unsqueeze(1).to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device.type, use_amp):
+        with autocast(device.type, use_amp, amp_dtype):
             output = model(img)
             sse = criterion(output, target)
             # The paper's loss is (1/2N) * sum ||pred - gt||^2. Summing without
@@ -482,8 +503,11 @@ def train(
 
         if use_amp:
             scaler.scale(loss).backward()
+            # Always unscale before measuring. Reading the norm off the scaled
+            # gradients reports the loss-scale factor (tens of thousands), not
+            # the real gradient, which makes the number useless for diagnosis.
+            scaler.unscale_(optimizer)
             if args.clip_grad > 0:
-                scaler.unscale_(optimizer)
                 grad_norm = float(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
                 )
@@ -491,6 +515,10 @@ def train(
                 grad_norm = grad_global_norm(model)
             scaler.step(optimizer)
             scaler.update()
+            # A collapsing scale means fp16 keeps overflowing, and every
+            # overflowing step is silently skipped by the scaler - which looks
+            # exactly like a model that refuses to learn.
+            amp_scale = scaler.get_scale()
         else:
             loss.backward()
             if args.clip_grad > 0:
@@ -500,6 +528,7 @@ def train(
             else:
                 grad_norm = grad_global_norm(model)
             optimizer.step()
+            amp_scale = float("nan")
 
         # Track per-sample SSE as well: unlike the optimised loss it is
         # comparable across batch sizes and --loss-norm settings.
@@ -529,6 +558,7 @@ def train(
                     "train/sse_per_sample": per_sample.val,
                     "train/sse_per_sample_avg": per_sample.avg,
                     "train/grad_norm": grad_norms.val,
+                    "train/amp_scale": amp_scale,
                     "train/batch_time": batch_time.val,
                     "train/batch_time_avg": batch_time.avg,
                     "train/data_time": data_time.val,
