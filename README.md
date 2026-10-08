@@ -115,6 +115,40 @@ PART=UCSD ./slurm_scripts/10_submit_csrnet_pipeline.sh
 
 Submits setup → prepare → train → evaluate as a dependency chain.
 
+## Results on UCSD
+
+Test MAE on the full 1200-frame test split (frames 1-600 and 1401-2000),
+best-validation checkpoint, Adam 1e-5 with a cosine schedule over 120 epochs:
+
+| configuration | test MAE | test RMSE |
+| --- | --- | --- |
+| this repo, sigma = 8 | **1.031** | **1.290** |
+| this repo, sigma = 3 (the paper's setting) | 1.698 | 2.062 |
+| CSRNet, as published | 1.16 | 1.47 |
+| MCNN, as published | 1.07 | 1.35 |
+
+The only difference between the two rows is the Gaussian kernel width used to
+build the ground truth. CSRNet Table 2 specifies sigma = 3 for UCSD, and that
+is still the default in `scripts/prepare_ucsd.py`, but it produces a target
+where only ~2.5% of output pixels are non-zero - so most of the gradient
+pushes toward predicting zero. At sigma = 8 each person covers ~8.5% of
+pixels. The paper never states whether its sigma is measured before or after
+the 4x upscale it also specifies, and sigma = 8 at 952x632 is close to
+sigma = 2 at native resolution.
+
+To reproduce the better row:
+
+```bash
+python scripts/prepare_ucsd.py --dataset-root UCSD_Crowd_Counting_Dataset     --output-dir data_splits --sigma 8     --processed-name ucsd_processed_s8 --prefix ucsd_s8
+```
+
+Caveats worth keeping attached to these numbers. Validation is the tail of
+each training clip and is harder than test (mean occupancy 28.5 against 24.5),
+so validation MAE runs higher than test. Checkpoint selection uses that
+validation split, not test. And the model reaches its best within a handful of
+epochs - 720 training frames drawn from only four clips does not support a
+long schedule, so the best-checkpoint mechanism is doing real work.
+
 ## `--gt-downsample`
 
 `image.py` shrinks the density map to the network's 1/8 output stride and
