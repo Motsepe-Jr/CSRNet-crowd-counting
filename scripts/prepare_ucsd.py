@@ -282,7 +282,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--sigma",
         type=float,
         default=3.0,
-        help="fixed Gaussian sigma, in *output* pixels (CSRNet Table 2 uses 3)",
+        help=(
+            "fixed Gaussian sigma, in *output* pixels. CSRNet Table 2 gives 3, "
+            "which is the default here for fidelity, but 8 trains far better: "
+            "measured test MAE 1.031 at sigma=8 against 1.698 at sigma=3, on "
+            "the same 1200-frame split with everything else identical. At "
+            "sigma=3 only ~2.5%% of output pixels are non-zero, so most of the "
+            "gradient says 'predict zero'; sigma=8 spreads each person over "
+            "~8.5%% of pixels. The paper never states whether its sigma=3 is "
+            "measured before or after the 4x upscale, and sigma=8 here is close "
+            "to sigma=2 at native resolution"
+        ),
     )
     parser.add_argument(
         "--roi",
