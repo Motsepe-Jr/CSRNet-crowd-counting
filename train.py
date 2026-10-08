@@ -154,7 +154,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--momentum", type=float, default=0.95)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--print-freq", type=int, default=30)
-    parser.add_argument("--seed", type=int, default=int(time.time()) & 0xFFFFFFFF)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "RNG seed. This used to default to int(time.time()), which meant "
+            "two runs differing only in the flag under test also differed in "
+            "initialisation, crop sampling and shuffling - so a sweep measured "
+            "the flag plus seed noise. Pass -1 for a random seed"
+        ),
+    )
     parser.add_argument(
         "--amp",
         action="store_true",
@@ -298,6 +308,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def set_seed(seed: int) -> None:
+    if seed < 0:
+        seed = int(time.time()) & 0xFFFFFFFF
+        print(f"using random seed {seed}")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
