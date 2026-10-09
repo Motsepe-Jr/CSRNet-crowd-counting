@@ -1,0 +1,8 @@
+run,test_mae,test_rmse,best_val_mae,best_val_epoch
+adam_sigma8,1.031,1.29,1.173,26
+s8_croponly,1.116,1.37,1.157,5
+sgd_sigma8,1.194,1.538,1.303,51
+sgd_sigma3,1.286,1.647,1.701,37
+s8_photoonly,1.305,1.584,1.156,20
+adam_sigma3,1.698,2.062,1.98,3
+s8_aug_long,1.832,2.14,1.209,26
